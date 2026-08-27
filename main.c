@@ -1,43 +1,97 @@
 #include "stm32f10x.h"
 #include "sys.h"
 #include "stdio.h"
-#include "colorful_led.h"   //ÒýÈëÍ·ÎÄ¼þ£¬Ê¶±ðº¯ÊýÉùÃ÷
+#include "colorful_led.h"
+#include "nfc.h"
+#include "encode.h"
+#include "motor.h"
+
+int16_t L_speed = 0;
+int16_t R_speed = 0;
+
+
+void My_USART2_IRQHandler(void)
+{
+	if(USART_GetITStatus(USART2, USART_IT_RXNE) != RESET)
+	{
+		uint8_t ch = USART_ReceiveData(USART2);
+		printf("RX2:%02X ",ch);  // ç›´æŽ¥ä»Žä¸²å£1æ‰“å°æ”¶åˆ°çš„æ¯ä¸€ä¸ªå­—èŠ‚ï¼
+		USART2_IRQHandler_Callback();
+	}
+}
+
 
 int main(void)
-{ 
-	Stm32_Clock_Init(9);
-	MY_NVIC_PriorityGroupConfig(2);
-	uart_init(115200);
-	JTAG_Set(JTAG_SWD_DISABLE);
-	JTAG_Set(SWD_ENABLE);
-	
-	colorful_led_Init();	//µ÷ÓÃ³õÊ¼»¯º¯Êý
-	printf("QSTÇàÈí\r\n");
-	
-	    
+{
+    int i;
 
-	      //ÉèÖÃµÆÉ«
-        //L_ws2812_rgb(1,WS_RED);
-        //L_ws2812_refresh(led_num);
+    RCC->CSR |= 1 << 24; // æ¸…é™¤å¤ä½æ ‡å¿—
+    Stm32_Clock_Init(9);
+    MY_NVIC_PriorityGroupConfig(2);
+    delay_init();
+    uart_init(115200);
+    uart2_init(115200);
 
-        //¿ªÆôµ¹³µÎ²µÆ
-        //R_led_mode();
-	
-	      //Ç°µÆìÅ²Ê
-	      //L_led_mode();
+    JTAG_Set(JTAG_SWD_DISABLE);
+    JTAG_Set(SWD_ENABLE);
 
-        //¹Ø±ÕÎ²µÆ
-        //R_led_CLC();
-				
-    while(1)
+    PWM_Init(7199, 9);
+    colorful_led_Init();
+
+    Encoder_Init_TIM2();
+    Encoder_Init_TIM3();
+
+    // é…ç½®SysTickï¼š72Mç³»ç»Ÿæ—¶é’Ÿï¼Œ1msäº§ç”Ÿä¸€æ¬¡ä¸­æ–­
+    SysTick_Config(72000000 / 1000);
+
+    printf("QST\r\n");
+		
+
+
+    /*************** å‰è¿›5ç§’ ***************/
+    Set_Pwm(4000, 4000);
+
+    for(i = 0; i < 50; i++)
     {
-      
-   //ÅÜÂíµÆ
-       L1_runingled(); //Õý (¼ÓÁË¸ö²ÊÉ«)
-			//L2_runingled();//·´  
-			//L3_runingled();//»ØÐý
-			
-        delay_ms(1000);
+        L_speed = Encoder_GetLeft();
+        R_speed = Encoder_GetRight();
+			  Car_Led_Run();
+
+        printf("Forward Left=%d, Right=%d\r\n",
+               L_speed, R_speed);
+
+        delay_ms(100);
     }
 
+
+    /*************** åœè½¦0.5ç§’ ***************/
+    Set_Pwm(0, 0);
+    delay_ms(500);
+
+
+    /*************** åŽé€€5ç§’ ***************/
+    Set_Pwm(-4000, -4000);
+
+    for(i = 0; i < 50; i++)
+    {
+        L_speed = Encoder_GetLeft();
+        R_speed = Encoder_GetRight();
+			Car_Led_Run();
+
+        printf("Backward Left=%d, Right=%d\r\n",
+               L_speed, R_speed);
+
+        delay_ms(100);
+    }
+
+
+    /*************** æœ€ç»ˆåœè½¦ ***************/
+    Set_Pwm(0, 0);
+		
+		while(1)
+		{
+			NFC_Handler();
+		}
+
 }
+
