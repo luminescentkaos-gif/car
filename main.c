@@ -73,6 +73,7 @@ int main(void)
 
 
     printf("QST\r\n");
+		
 
 
     /* ============================
@@ -82,6 +83,7 @@ int main(void)
     for(i = 0; i < 50; i++)
     {
         Straight_Control(1);
+			
 
         Car_Led_Run();
 
