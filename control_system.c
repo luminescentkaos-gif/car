@@ -31,41 +31,37 @@ int Motor_B = 0;
  *
  * 100ms目标约133个计数
  */
+ 
+ //参数设置区域
+ 
+#define CONTROL_PERIOD_MS      100
+#define CPR_PER_REV            2800.0f
 #define TARGET_SPEED_RAD       3.0f
 
+#define KP_A                   1.0f
+#define KI_A                   0.05f
 
-/* 左轮PI */
-#define KP_A                   3.0f
-#define KI_A                   0.20f
+#define KP_B                   1.0f
+#define KI_B                   0.05f
 
+#define INTEGRAL_MAX           2000.0f
+#define INTEGRAL_MIN          -2000.0f
 
-/* 右轮PI */
-#define KP_B                   3.0f
-#define KI_B                   0.20f
+#define STRAIGHT_K             0.2f
 
-
-/* 积分限幅 */
-#define INTEGRAL_MAX           3000.0f
-#define INTEGRAL_MIN          -3000.0f
-
-
-/*
- * 左右轮启动PWM
- *
- * 现在先都设1500
- *
- * 后面根据实际启动情况再调整
- */
-#define PWM_START_A            1500
-#define PWM_START_B            1500
+/* 直线闭环参数 */
+#define STRAIGHT_FF_K  13.0f   /* 从 17 降下来，减少起步超速 */
+#define STRAIGHT_KP    2.0f    /* 从 1.0 加大，比例项直接压制超速 */
+#define STRAIGHT_KI    0.08f   /* 略加大，加快收敛 */
+#define STRAIGHT_DEADZONE 3
+#define PWM_MAX        5000
 
 
-/*
- * 现在先关闭跑直纠偏
- *
- * 先把双轮速度闭环跑稳定
- */
-#define STRAIGHT_K             0.0f
+/* 直线纠偏参数 */
+#define STEER_K        0.05f   /* 里程差纠偏增益，先小后大 */
+#define STEER_MAX      400     /* 单次纠偏量限幅，防蛇形摆动 */
+#define DIST_MAX       800     /* 里程差累计限幅，防饱和 */
+
 
 
 /* ==============================
@@ -89,138 +85,82 @@ int Rs_To_CPR(float speed)
 
 
 /* ==============================
- * 左轮 PI
+ * 左右轮 PI
  * ============================== */
 int Incremental_PI_A(int now, int target)
 {
     static float integral_A = 0.0f;
-
     float error;
     float output;
 
-
-    /* 速度误差 */
     error = (float)(target - now);
-
-
-    /* 积分 */
     integral_A += error;
 
-
-    /* 积分限幅 */
     if(integral_A > INTEGRAL_MAX)
         integral_A = INTEGRAL_MAX;
-
     if(integral_A < INTEGRAL_MIN)
         integral_A = INTEGRAL_MIN;
 
+    output = KP_A * error + KI_A * integral_A;
 
-    /* PI */
-    output =
-        KP_A * error
-        +
-        KI_A * integral_A;
-
-
-    /*
-     * 仅在电机还没有开始转的时候
-     * 提供启动PWM
-     */
-    if(target > 0)
-    {
-        if(now > -5 && now < 5)
-        {
-            if(output < PWM_START_A)
-                output = PWM_START_A;
-        }
-    }
-    else if(target < 0)
-    {
-        if(now > -5 && now < 5)
-        {
-            if(output > -PWM_START_A)
-                output = -PWM_START_A;
-        }
-    }
-
-
-    /* PWM限幅 */
     if(output > 7199)
         output = 7199;
-
     if(output < -7199)
         output = -7199;
-
 
     return (int)output;
 }
 
-
-/* ==============================
- * 右轮 PI
- * ============================== */
 int Incremental_PI_B(int now, int target)
 {
     static float integral_B = 0.0f;
-
     float error;
     float output;
 
-
-    /* 速度误差 */
     error = (float)(target - now);
-
-
-    /* 积分 */
     integral_B += error;
 
-
-    /* 积分限幅 */
     if(integral_B > INTEGRAL_MAX)
         integral_B = INTEGRAL_MAX;
-
     if(integral_B < INTEGRAL_MIN)
         integral_B = INTEGRAL_MIN;
 
+    output = KP_B * error + KI_B * integral_B;
 
-    /* PI */
-    output =
-        KP_B * error
-        +
-        KI_B * integral_B;
-
-
-    /*
-     * 启动PWM
-     */
-    if(target > 0)
-    {
-        if(now > -5 && now < 5)
-        {
-            if(output < PWM_START_B)
-                output = PWM_START_B;
-        }
-    }
-    else if(target < 0)
-    {
-        if(now > -5 && now < 5)
-        {
-            if(output > -PWM_START_B)
-                output = -PWM_START_B;
-        }
-    }
-
-
-    /* PWM限幅 */
     if(output > 7199)
         output = 7199;
-
     if(output < -7199)
         output = -7199;
 
-
     return (int)output;
 }
+
+/* 前馈+比例 闭环，带死区与限幅。target/now 均为每周期编码器计数 */
+static int Wheel_Control(int target, int now, int forward)
+{
+    static float integral = 0.0f;
+    int error = target - now;
+    int output;
+
+    /* 前馈：起步就有足够动力，PWM = FF_K × 目标计数（带符号） */
+    output = (int)((float)target * STRAIGHT_FF_K);
+
+    if (error > -STRAIGHT_DEADZONE && error < STRAIGHT_DEADZONE) {
+        integral = 0.0f;
+        return output;          /* 死区内保持前馈动力，清积分 */
+    }
+
+    /* 积分补偿稳态误差 */
+    integral += (float)error * STRAIGHT_KI;
+    if (integral >  INTEGRAL_MAX) integral =  INTEGRAL_MAX;
+    if (integral < -INTEGRAL_MAX) integral = -INTEGRAL_MAX;
+
+    output += (int)((float)error * STRAIGHT_KP) + (int)integral;
+    if (output >  PWM_MAX) output =  PWM_MAX;
+    if (output < -PWM_MAX) output = -PWM_MAX;
+    return output;
+}
+
 
 
 /* ==============================
@@ -233,199 +173,60 @@ void Straight_Control(int forward)
 {
     int encoder_left;
     int encoder_right;
-
     int target_count;
     int target_left;
     int target_right;
-
     int pwm_left;
     int pwm_right;
-
-    int abs_left;
-    int abs_right;
-
-    int diff;
-    int correction;
+	    int steer;                    /* 纠偏量 */
+    static long dist_error = 0;   /* 左右轮里程差累计：正 = 左轮多走 */
+	    static int dbg_cnt = 0;   /* 调试打印分频计数 */
 
 
-    /* ==========================
-     * 1.读取编码器
-     * ========================== */
 
-    /*
-     * 左轮：
-     * 前进+
-     * 后退-
-     */
-    encoder_left = Encoder_GetLeft();
-
-
-    /*
-     * 右轮：
-     * 前进+
-     * 后退-
-     *
-     * 注意：
-     * 这里绝对不能取负号！
-     */
-    encoder_right = Encoder_GetRight();
-
-
-    /* 保存 */
-    L_coder = encoder_left;
+    encoder_left  = (int)Encoder_GetLeft();
+    encoder_right = (int)Encoder_GetRight();
+    L_coder = encoder_left;    /* ← 加这两行，把实际值赋给打印用的全局变量 */
     R_coder = encoder_right;
 
-
-    /* ==========================
-     * 2.目标编码器速度
-     * ========================== */
-
-    target_count =
-        Rs_To_CPR(TARGET_SPEED_RAD);
-
-
-    /* ==========================
-     * 3.设置目标方向
-     * ========================== */
-
-    if(forward > 0)
+    /* 目标：每周期增量计数，与 Rs_To_CPR 同口径 */
+    target_count = Rs_To_CPR(TARGET_SPEED_RAD);
+    if (forward > 0)
     {
-        /*
-         * 前进
-         */
-        target_left  = target_count;
-        target_right = target_count;
+        target_left  =  target_count;
+        target_right =  target_count;
     }
     else
     {
-        /*
-         * 后退
-         */
         target_left  = -target_count;
         target_right = -target_count;
     }
 
+    pwm_left  = Wheel_Control(target_left,  encoder_left,  forward);
+    pwm_right = Wheel_Control(target_right, encoder_right, forward);
 
-    /* ==========================
-     * 4.左右轮分别PI闭环
-     * ========================== */
-
-    pwm_left =
-        Incremental_PI_A(
-            encoder_left,
-            target_left
-        );
-
-
-    pwm_right =
-        Incremental_PI_B(
-            encoder_right,
-            target_right
-        );
-
-
-    /* ==========================
-     * 5.计算速度绝对值
-     * ========================== */
-
-    if(encoder_left < 0)
-        abs_left = -encoder_left;
-    else
-        abs_left = encoder_left;
-
-
-    if(encoder_right < 0)
-        abs_right = -encoder_right;
-    else
-        abs_right = encoder_right;
-
-
-    /* ==========================
-     * 6.左右轮速度差
-     * ========================== */
-
-    diff =
-        abs_left - abs_right;
-
-
-    /* ==========================
-     * 7.直线纠偏
-     * ========================== */
-
-    correction =
-        (int)(STRAIGHT_K * (float)diff);
-
-
-    /*
-     * 左轮快：
-     * 左PWM减小
-     * 右PWM增大
-     *
-     * 右轮快：
-     * 左PWM增大
-     * 右PWM减小
-     */
-    pwm_left  -= correction;
-    pwm_right += correction;
-
-
-    /* ==========================
-     * 8.PWM限幅
-     * ========================== */
-
-    if(pwm_left > 7199)
-        pwm_left = 7199;
-
-    if(pwm_left < -7199)
-        pwm_left = -7199;
-
-
-    if(pwm_right > 7199)
-        pwm_right = 7199;
-
-    if(pwm_right < -7199)
-        pwm_right = -7199;
-
-
-    /* ==========================
-     * 9.输出PWM
-     * ========================== */
+    /* ===== 直线纠偏：里程差 → 反向差速补偿 ===== */
+    dist_error += (encoder_left - encoder_right);      /* 累计里程差 */
+    if (dist_error >  DIST_MAX) dist_error =  DIST_MAX;
+    if (dist_error < -DIST_MAX) dist_error = -DIST_MAX;
+    steer = (int)((float)dist_error * STEER_K);
+    if (steer >  STEER_MAX) steer =  STEER_MAX;
+    if (steer < -STEER_MAX) steer = -STEER_MAX;
+    pwm_left  -= steer;   /* 左轮多走 → 左轮减速 */
+    pwm_right += steer;   /* 右轮加速 */
 
     Motor_A = pwm_left;
     Motor_B = pwm_right;
+    Set_Pwm(Motor_A, Motor_B);
+		
+		    /* ===== 串口调试输出：每10个周期(约1s)打印一次 ===== */
+    if (++dbg_cnt >= 10)
+    {
+        dbg_cnt = 0;
+        printf("tgt=%d L=%d R=%d PWM_A=%d PWM_B=%d steer=%d dist=%ld\r\n",
+               target_count, L_coder, R_coder, Motor_A, Motor_B, steer, dist_error);
+    }
 
-    Set_Pwm(
-        Motor_A,
-        Motor_B
-    );
 
-
-    /* ==========================
-     * 10.串口输出
-     * ========================== */
-
-    printf(
-        "L:%d R:%d\r\n",
-        encoder_left,
-        encoder_right
-    );
-
-    printf(
-        "TL:%d TR:%d\r\n",
-        target_left,
-        target_right
-    );
-
-    printf(
-        "PWM_L:%d PWM_R:%d\r\n",
-        Motor_A,
-        Motor_B
-    );
-
-    printf(
-        "DIFF:%d COR:%d\r\n",
-        diff,
-        correction
-    );
 }
 
